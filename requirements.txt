@@ -1,0 +1,6 @@
+openai
+chromadb
+pandas
+openpyxl
+streamlit
+python-dotenv
