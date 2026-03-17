@@ -16,8 +16,88 @@ client = OpenAI(api_key=API_KEY)
 
 @st.cache_resource
 def load_collection():
+    import pandas as pd
+    from pathlib import Path
+
     chroma_client = chromadb.PersistentClient(path=DB_PATH)
-    return chroma_client.get_collection("family_offices")
+
+    # Check if collection already exists and is populated
+    existing = [c.name for c in chroma_client.list_collections()]
+    if "family_offices" in existing:
+        collection = chroma_client.get_collection("family_offices")
+        if collection.count() > 0:
+            return collection
+        chroma_client.delete_collection("family_offices")
+
+    # Auto-ingest from XLSX on first run
+    st.info("Building intelligence database on first run — this takes ~90 seconds...")
+
+    XLSX_PATH = Path(__file__).parent / "FamilyOffice_Intelligence_Dataset.xlsx"
+    df = pd.read_excel(XLSX_PATH, sheet_name="Family Office Intelligence")
+    df = df.fillna("")
+
+    def row_to_text(row):
+        return f"""Family Office: {row['FO Firm Name']}
+Type: {row['FO Type (SFO/MFO)']}
+AUM: {row['AUM Range']}
+Location: {row['City/Location']}, {row['Country']}
+Website: {row['FO Website URL']}
+Founding Family / Source of Wealth: {row['Founding Family / Source of Wealth']}
+Investment Thesis: {row['Investment Thesis / Description']}
+Investment Strategy: {row['Investment Strategy Summary']}
+Sector Focus: {row['Sector Focus']}
+Investment Vehicles: {row['Investment Vehicles']}
+Check Size Range: {row['Acceptable Check Size Range']}
+Investment Style: {row['Investment Style']}
+Co-Invest Frequency: {row['Co-Invest Frequency']}
+Notable Portfolio Companies: {row['Notable Portfolio Companies']}
+Key Decision Maker: {row['Key Decision Maker - First Name']} {row['Key Decision Maker - Last Name / Role']}
+Contact Email: {row['Contact Email (Primary)']}
+Contact LinkedIn: {row['Contact LinkedIn']}
+Direct Investment Active: {row['Direct Investment Active (Y/N)']}
+Last Active Investment Year: {row['Last Active Investment (Year)']}
+Data Source: {row['Data Source(s)']}
+Validation Status: {row['Validation Status']}
+Notes: {row['Notes / Additional Intelligence']}""".strip()
+
+    texts = [row_to_text(row) for _, row in df.iterrows()]
+    ids = [f"fo_{i}" for i in range(len(df))]
+    metadatas = [
+        {
+            "name":     str(row["FO Firm Name"]),
+            "type":     str(row["FO Type (SFO/MFO)"]),
+            "aum":      str(row["AUM Range"]),
+            "country":  str(row["Country"]),
+            "sector":   str(row["Sector Focus"]),
+            "email":    str(row["Contact Email (Primary)"]),
+            "check":    str(row["Acceptable Check Size Range"]),
+            "coinvest": str(row["Co-Invest Frequency"]),
+            "direct":   str(row["Direct Investment Active (Y/N)"]),
+            "style":    str(row["Investment Style"]),
+        }
+        for _, row in df.iterrows()
+    ]
+
+    collection = chroma_client.create_collection(
+        name="family_offices",
+        metadata={"hnsw:space": "cosine"}
+    )
+
+    # Embed in batches
+    all_embeddings = []
+    for i in range(0, len(texts), 50):
+        batch = texts[i:i+50]
+        response = client.embeddings.create(model=EMBED_MODEL, input=batch)
+        all_embeddings.extend([item.embedding for item in response.data])
+
+    collection.add(
+        documents=texts,
+        embeddings=all_embeddings,
+        ids=ids,
+        metadatas=metadatas
+    )
+
+    return collection
 
 def embed_query(text):
     response = client.embeddings.create(model=EMBED_MODEL, input=[text])
