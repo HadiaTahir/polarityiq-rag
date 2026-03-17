@@ -306,7 +306,7 @@ st.markdown("""
     .footer {
         text-align: center;
         padding: 1.5rem 0 0.5rem 0;
-        color: #b1b3b5 !important;
+        color: #e6eaed !important;
         font-size: 0.82rem;
         font-weight: 300;
         letter-spacing: 0.02em;
