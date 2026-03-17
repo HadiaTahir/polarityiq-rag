@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 import os
 
 load_dotenv()
-API_KEY     = os.getenv("OPENAI_API_KEY")
+API_KEY     = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY", None)
 DB_PATH     = str(Path(__file__).parent / "chroma_db")
 EMBED_MODEL = "text-embedding-3-small"
 GPT_MODEL   = "gpt-4o"
