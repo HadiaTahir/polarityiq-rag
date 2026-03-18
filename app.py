@@ -6,8 +6,6 @@ from dotenv import load_dotenv
 import os
 import time
 
-import re
-
 load_dotenv()
 API_KEY     = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY", None)
 DB_PATH     = str(Path(__file__).parent / "chroma_db")
@@ -17,62 +15,6 @@ TOP_K       = 8
 
 client = OpenAI(api_key=API_KEY)
 
-def parse_aum_billions(aum_str: str) -> float:
-    """
-    Convert AUM strings like '$225B', '$10B', '$500M', '$1.2T'
-    into a float number of billions. Returns 0.0 if unparseable.
-    Examples:
-        '$225B'  -> 225.0
-        '$500M'  -> 0.5
-        '$1.2T'  -> 1200.0
-        '$5B+'   -> 5.0
-    """
-    if not aum_str:
-        return 0.0
-    s = aum_str.upper().replace(",", "").replace(" ", "")
-    # Extract first number (handles ranges like '$5B-$10B' — takes lower bound)
-    match = re.search(r"[\$]?([\d]+\.?[\d]*)\s*([TMBtmb])", s)
-    if not match:
-        return 0.0
-    value  = float(match.group(1))
-    suffix = match.group(2).upper()
-    if suffix == "T":
-        return value * 1000.0
-    elif suffix == "B":
-        return value
-    elif suffix == "M":
-        return value / 1000.0
-    return 0.0
-
-def extract_aum_threshold(query: str):
-    """
-    Detect AUM threshold phrases in the query.
-    Returns (operator, threshold_billions) or None.
-    Examples:
-        'AUM above $50B'   -> ('>', 50.0)
-        'AUM over $100B'   -> ('>', 100.0)
-        'AUM below $10B'   -> ('<', 10.0)
-        'AUM above $500M'  -> ('>', 0.5)
-    """
-    q = query.upper()
-    pattern = r"(?:AUM|ASSETS?)?\s*(?:ABOVE|OVER|MORE THAN|GREATER THAN|>)\s*\$?([\d]+\.?[\d]*)\s*([TMBtmb])"
-    match = re.search(pattern, q)
-    if match:
-        val    = float(match.group(1))
-        suffix = match.group(2).upper()
-        billions = val * 1000 if suffix == "T" else val if suffix == "B" else val / 1000
-        return (">", billions)
-
-    pattern_below = r"(?:AUM|ASSETS?)?\s*(?:BELOW|UNDER|LESS THAN|<)\s*\$?([\d]+\.?[\d]*)\s*([TMBtmb])"
-    match = re.search(pattern_below, q)
-    if match:
-        val    = float(match.group(1))
-        suffix = match.group(2).upper()
-        billions = val * 1000 if suffix == "T" else val if suffix == "B" else val / 1000
-        return ("<", billions)
-
-    return None
-
 @st.cache_resource(show_spinner=False)
 def load_collection():
     import pandas as pd
@@ -80,22 +22,12 @@ def load_collection():
 
     chroma_client = chromadb.PersistentClient(path=DB_PATH)
 
-    # Check if collection already exists, is populated, AND has aum_billions metadata.
-    # If aum_billions is missing (old schema), force a rebuild so AUM filtering works.
-    SCHEMA_VERSION = "v2"  # bump this whenever metadata schema changes
+    # Check if collection already exists and is populated
     existing = [c.name for c in chroma_client.list_collections()]
     if "family_offices" in existing:
         collection = chroma_client.get_collection("family_offices")
         if collection.count() > 0:
-            # Verify schema version via a spot-check on the first record
-            try:
-                sample = collection.get(limit=1, include=["metadatas"])
-                has_aum_billions = "aum_billions" in (sample["metadatas"] or [{}])[0]
-                if has_aum_billions:
-                    return collection  # schema is current, use cached collection
-            except Exception:
-                pass
-        # Schema is outdated or empty — rebuild
+            return collection
         chroma_client.delete_collection("family_offices")
 
     # ── COLD START: show a proper loading UI ──────────────────────────────────
@@ -161,17 +93,16 @@ Notes: {row['Notes / Additional Intelligence']}""".strip()
     ids   = [f"fo_{i}" for i in range(len(df))]
     metadatas = [
         {
-            "name":         str(row["FO Firm Name"]),
-            "type":         str(row["FO Type (SFO/MFO)"]),
-            "aum":          str(row["AUM Range"]),
-            "aum_billions": parse_aum_billions(str(row["AUM Range"])),
-            "country":      str(row["Country"]),
-            "sector":       str(row["Sector Focus"]),
-            "email":        str(row["Contact Email (Primary)"]),
-            "check":        str(row["Acceptable Check Size Range"]),
-            "coinvest":     str(row["Co-Invest Frequency"]),
-            "direct":       str(row["Direct Investment Active (Y/N)"]),
-            "style":        str(row["Investment Style"]),
+            "name":     str(row["FO Firm Name"]),
+            "type":     str(row["FO Type (SFO/MFO)"]),
+            "aum":      str(row["AUM Range"]),
+            "country":  str(row["Country"]),
+            "sector":   str(row["Sector Focus"]),
+            "email":    str(row["Contact Email (Primary)"]),
+            "check":    str(row["Acceptable Check Size Range"]),
+            "coinvest": str(row["Co-Invest Frequency"]),
+            "direct":   str(row["Direct Investment Active (Y/N)"]),
+            "style":    str(row["Investment Style"]),
         }
         for _, row in df.iterrows()
     ]
@@ -221,35 +152,11 @@ def embed_query(text):
 def retrieve(query, top_k=TOP_K):
     collection = load_collection()
     query_embedding = embed_query(query)
-
-    # AUM-aware retrieval: if query contains a threshold like "above $50B",
-    # apply a ChromaDB metadata filter so only qualifying records are searched.
-    # Without this, top_k=8 may not surface any large-AUM records at all.
-    aum_filter = extract_aum_threshold(query)
-    where_clause = None
-    if aum_filter:
-        operator, threshold = aum_filter
-        if operator == ">":
-            where_clause = {"aum_billions": {"$gt": threshold}}
-        elif operator == "<":
-            where_clause = {"aum_billions": {"$lt": threshold}}
-
-    kwargs = dict(
+    results = collection.query(
         query_embeddings=[query_embedding],
         n_results=top_k,
         include=["documents", "metadatas", "distances"]
     )
-    if where_clause:
-        kwargs["where"] = where_clause
-
-    try:
-        results = collection.query(**kwargs)
-    except Exception:
-        # Fallback: if filter yields fewer results than top_k ChromaDB raises;
-        # retry without filter so the user always gets a response.
-        kwargs.pop("where", None)
-        results = collection.query(**kwargs)
-
     return results["documents"][0], results["metadatas"][0], results["distances"][0]
 
 def generate_answer(query, documents):
@@ -565,8 +472,7 @@ st.markdown('<p class="section-header">🔍 Query the Intelligence Database</p>'
 examples = [
     "Which family offices focus on AI with check sizes above $10M?",
     "Show me all SFOs in the Middle East that made direct investments recently",
-    "Which European family offices co-invest frequently in clean energy?",
-    "Find family offices in Texas focused on energy with contact emails",
+    "Find family offices in Texas focused on energy",
     "Which family offices have AUM above $50B and invest in technology?",
     "Show me impact-focused family offices with high co-invest frequency",
     "Which family offices were founded by tech entrepreneurs?",
