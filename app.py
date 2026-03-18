@@ -565,8 +565,7 @@ st.markdown('<p class="section-header">🔍 Query the Intelligence Database</p>'
 examples = [
     "Which family offices focus on AI with check sizes above $10M?",
     "Show me all SFOs in the Middle East that made direct investments recently",
-    "Which European family offices co-invests in clean energy?",
-    "Find family offices in Texas focused on energy with contact emails",
+    "Find family offices in Texas focused on energy",
     "Which family offices have AUM above $50B and invest in technology?",
     "Show me impact-focused family offices with high co-invest frequency",
     "Which family offices were founded by tech entrepreneurs?",
