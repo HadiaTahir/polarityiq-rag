@@ -4,6 +4,7 @@ from openai import OpenAI
 from pathlib import Path
 from dotenv import load_dotenv
 import os
+import time
 
 load_dotenv()
 API_KEY     = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY", None)
@@ -14,7 +15,7 @@ TOP_K       = 8
 
 client = OpenAI(api_key=API_KEY)
 
-@st.cache_resource
+@st.cache_resource(show_spinner=False)
 def load_collection():
     import pandas as pd
     from pathlib import Path
@@ -29,10 +30,36 @@ def load_collection():
             return collection
         chroma_client.delete_collection("family_offices")
 
-    # Auto-ingest from XLSX on first run
-    st.info("Building intelligence database on first run — this takes ~90 seconds...")
+    # ── COLD START: show a proper loading UI ──────────────────────────────────
+    # This only runs once on first deployment. Subsequent loads use the cache.
+    cold_start_placeholder = st.empty()
+    with cold_start_placeholder.container():
+        st.markdown("""
+        <div style="
+            background: linear-gradient(135deg, #1A1A2E 0%, #162447 100%);
+            border: 1px solid rgba(37, 99, 235, 0.4);
+            border-left: 4px solid #2563EB;
+            border-radius: 16px;
+            padding: 2rem 2.5rem;
+            margin: 1rem 0;
+        ">
+            <h3 style="color: #60a5fa; margin: 0 0 0.5rem 0; font-size: 1.1rem;">
+                ⚙️ Building Intelligence Database
+            </h3>
+            <p style="color: #94a3b8; margin: 0 0 1rem 0; font-size: 0.95rem;">
+                First-run setup: embedding 266 family office records into the vector database.
+                This happens once and takes approximately 60–90 seconds. Subsequent loads are instant.
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        progress_bar = st.progress(0, text="Loading dataset...")
+        status_text  = st.empty()
 
     XLSX_PATH = Path(__file__).parent / "FamilyOffice_Intelligence_Dataset.xlsx"
+
+    status_text.caption("📂 Reading Excel dataset...")
+    progress_bar.progress(5, text="Reading dataset (266 records)...")
     df = pd.read_excel(XLSX_PATH, sheet_name="Family Office Intelligence")
     df = df.fillna("")
 
@@ -60,8 +87,10 @@ Data Source: {row['Data Source(s)']}
 Validation Status: {row['Validation Status']}
 Notes: {row['Notes / Additional Intelligence']}""".strip()
 
+    status_text.caption("📝 Building document chunks...")
+    progress_bar.progress(15, text="Preparing 266 document chunks...")
     texts = [row_to_text(row) for _, row in df.iterrows()]
-    ids = [f"fo_{i}" for i in range(len(df))]
+    ids   = [f"fo_{i}" for i in range(len(df))]
     metadatas = [
         {
             "name":     str(row["FO Firm Name"]),
@@ -83,19 +112,36 @@ Notes: {row['Notes / Additional Intelligence']}""".strip()
         metadata={"hnsw:space": "cosine"}
     )
 
-    # Embed in batches
+    # Embed in batches of 50 — show per-batch progress
     all_embeddings = []
-    for i in range(0, len(texts), 50):
+    total_batches  = (len(texts) + 49) // 50
+    for batch_num, i in enumerate(range(0, len(texts), 50)):
         batch = texts[i:i+50]
+        pct   = 20 + int((batch_num / total_batches) * 65)
+        progress_bar.progress(
+            pct,
+            text=f"Generating embeddings — batch {batch_num + 1} of {total_batches}..."
+        )
+        status_text.caption(
+            f"🔢 Embedding records {i+1}–{min(i+50, len(texts))} of {len(texts)} "
+            f"via text-embedding-3-small..."
+        )
         response = client.embeddings.create(model=EMBED_MODEL, input=batch)
         all_embeddings.extend([item.embedding for item in response.data])
 
+    status_text.caption("💾 Writing vectors to ChromaDB...")
+    progress_bar.progress(88, text="Storing vectors in ChromaDB...")
     collection.add(
         documents=texts,
         embeddings=all_embeddings,
         ids=ids,
         metadatas=metadatas
     )
+
+    progress_bar.progress(100, text="✅ Intelligence database ready!")
+    status_text.caption(f"✅ {len(texts)} family office records indexed successfully.")
+    time.sleep(1.2)
+    cold_start_placeholder.empty()   # clear the setup UI — query interface takes over
 
     return collection
 
@@ -293,7 +339,7 @@ st.markdown("""
         font-weight: 500 !important;
     }
 
-    /* ── ANSWER BOX — uses st.markdown so styling goes on wrapper ── */
+    /* ── ANSWER BOX ── */
     .answer-container {
         background: #1e2235;
         border: 1px solid rgba(37, 99, 235, 0.25);
@@ -416,6 +462,10 @@ for col, num, label in zip(
 st.markdown("<br>", unsafe_allow_html=True)
 st.markdown('<hr>', unsafe_allow_html=True)
 
+# ── TRIGGER COLLECTION LOAD (with cold-start UI if needed) ───────────────────
+# Called here so the loading UI appears before the query interface, not mid-search
+load_collection()
+
 # ── QUERY INTERFACE ───────────────────────────────────────────────────────────
 st.markdown('<p class="section-header">🔍 Query the Intelligence Database</p>', unsafe_allow_html=True)
 
@@ -460,13 +510,11 @@ if search_btn and query and query.strip():
             documents, metadatas, distances = retrieve(query, top_k=top_k)
             answer = generate_answer(query, documents)
 
-            # ── INTELLIGENCE REPORT — rendered as native markdown ──
             st.markdown('<p class="section-header">💡 Intelligence Report</p>', unsafe_allow_html=True)
             st.markdown('<div class="answer-container">', unsafe_allow_html=True)
             st.markdown(answer)
             st.markdown('</div>', unsafe_allow_html=True)
 
-            # ── SOURCE RECORDS ──
             st.markdown(f'<p class="section-header">📋 Source Records ({len(documents)} retrieved)</p>', unsafe_allow_html=True)
             st.caption("Records retrieved from the vector database — ranked by semantic relevance to your query")
 
